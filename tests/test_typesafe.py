@@ -3,7 +3,7 @@
 
 CI-safe: the plugin-level tests drive the real Rust `typesafe_eval` expression
 against a local stdlib mock of TypeSafe's `POST /v1/systemone`, reached by
-pointing `TYPESAFE_BASE_URL` at it -- the same `ThreadingHTTPServer` pattern
+pointing `TYPESAFE_BASE_URL` at it -- the same `BacklogHTTPServer` pattern
 `tests/test_usage_accounting.py` uses for the chat providers. No API key and
 no network are required.
 
@@ -17,7 +17,7 @@ import json
 import os
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 import enum
 from typing import Literal, Optional
@@ -25,6 +25,8 @@ from typing import Literal, Optional
 import polars as pl
 import pytest
 from pydantic import BaseModel, Field
+
+from helpers import BacklogHTTPServer
 
 from polar_llama import (
     choice,
@@ -105,7 +107,7 @@ def _default_responder(body: dict):
 
 @pytest.fixture
 def mock_server(monkeypatch):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockSystemOneHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _MockSystemOneHandler)
     server.lock = threading.Lock()
     server.requests_received = []
     server.auth_headers = []
