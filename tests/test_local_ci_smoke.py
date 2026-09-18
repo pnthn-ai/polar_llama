@@ -18,33 +18,70 @@ import sys
 import polars as pl
 import pytest
 
+from helpers import assert_import_stays_mlx_free
+
 pytestmark = pytest.mark.local
 
 
 def test_import_local_does_not_import_mlx():
-    """Importing ``polar_llama.local`` must never eagerly import mlx/mlx-lm."""
+    """Importing ``polar_llama.local`` must never eagerly import mlx/mlx-lm.
+
+    Checked in a fresh interpreter. Asserting ``"mlx" not in sys.modules``
+    in-process only holds on a machine where mlx is absent AND no earlier test
+    imported it, so it quietly stopped testing anything on an Apple-silicon box
+    with the ``[local]`` extra -- the machine most able to break the invariant.
+    """
     import polar_llama.local as local
 
     assert local is not None
-    # Merely importing the package must not have pulled in the optional deps.
-    assert "mlx" not in sys.modules
-    assert "mlx_lm" not in sys.modules
+    assert_import_stays_mlx_free(["polar_llama.local"])
 
 
-def test_is_mlx_available_false_in_ci():
-    """On CI (and any machine without the [local] extra) mlx is unavailable."""
+def test_mlx_availability_is_reported_consistently():
+    """``HAS_MLX`` and ``is_mlx_available()`` must agree with the environment.
+
+    The previous form asserted both were ``False``, which is a fact about a
+    machine without the ``[local]`` extra rather than about this code -- it
+    failed wherever mlx is genuinely installed. What is worth pinning is that
+    the lazily-computed ``HAS_MLX`` tracks ``is_mlx_available()`` and that both
+    return real booleans.
+    """
     from polar_llama.local import HAS_MLX, is_mlx_available
 
-    assert is_mlx_available() is False
-    assert HAS_MLX is False
+    try:
+        import mlx_lm  # noqa: F401
+
+        expected = True
+    except ImportError:
+        expected = False
+
+    assert is_mlx_available() is expected
+    assert HAS_MLX is expected
 
 
-def test_require_mlx_raises_helpful_error():
-    """``require_mlx`` should point users at the optional extra, not crash raw."""
+def test_require_mlx_raises_helpful_error(monkeypatch):
+    """``require_mlx`` should point users at the optional extra, not crash raw.
+
+    The error path is forced by poisoning ``sys.modules`` (a ``None`` entry
+    makes ``import`` raise ``ImportError``), so this exercises the message on
+    every machine instead of only where mlx happens to be missing.
+    """
     from polar_llama.local import require_mlx
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", None)
 
     with pytest.raises(ImportError, match=r"polar-llama\[local\]"):
         require_mlx()
+
+
+def test_require_mlx_returns_the_module_when_available():
+    """The success path, on a machine that actually has the extra."""
+    from polar_llama.local import is_mlx_available, require_mlx
+
+    if not is_mlx_available():
+        pytest.skip("mlx-lm not installed")
+
+    assert require_mlx().__name__ == "mlx_lm"
 
 
 def test_inference_local_in_process_fake_row_order(monkeypatch):

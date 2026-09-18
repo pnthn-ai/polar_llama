@@ -14,6 +14,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from helpers import BacklogHTTPServer
+
 import polars as pl
 import pytest
 
@@ -110,7 +112,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def sse_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _SSEHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _SSEHandler)
     server.daemon_threads = True
     server.scripts = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)

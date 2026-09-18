@@ -83,4 +83,5 @@ include = [{ path = "polar_llama/data/*.json", format = ["sdist", "wheel"] }]
 markers = [
     "local_gpu: requires Apple GPU + mlx (skipped in CI)",
     "local: local backend logic tests (CI-safe)",
+    "real_api: hits a real provider API with the caller's own credentials",
 ]

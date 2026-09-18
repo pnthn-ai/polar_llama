@@ -11,8 +11,11 @@ needs no API key, no mlx/mlx-lm, and no GPU -- safe for Linux CI.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from helpers import BacklogHTTPServer
 
 import polars as pl
 import pytest
@@ -71,7 +74,7 @@ class _MockOpenAIHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def mock_openai_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockOpenAIHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _MockOpenAIHandler)
     server.lock = threading.Lock()
     server.requests_received = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -91,6 +94,14 @@ def _isolated_openai_base_url(monkeypatch):
     # other test modules regardless of how this test mutates it.
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     yield
+    # The teardown half matters as much as the setup half. `start_server_backend`
+    # assigns os.environ directly -- by design, that is how the server engine
+    # points the Rust client at a local server -- so monkeypatch has no record
+    # of the assignment to undo, and `delenv` above recorded nothing either
+    # (the var was already absent). Without this pop, OPENAI_BASE_URL survives
+    # this module still pointing at a mock server whose port is now closed, and
+    # every later test that talks to OpenAI fails with a connection error.
+    os.environ.pop("OPENAI_BASE_URL", None)
 
 
 @pytest.mark.local
