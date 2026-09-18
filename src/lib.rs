@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod quality;
 mod stream_pyfn;
+mod typesafe_expr;
 
 #[cfg(target_os = "linux")]
 use jemallocator::Jemalloc;
@@ -59,6 +60,42 @@ impl PyProvider {
     }
 }
 
+
+/// List the TypeSafe System One models available to `TYPESAFE_API_KEY`.
+///
+/// Returns `[{"name", "description", "release_date"}, ...]`. Exposed as a
+/// plain function rather than an expression because the catalogue is not
+/// row-shaped -- see `polar_llama.typesafe.list_models`.
+#[pyfunction]
+fn _typesafe_list_models(py: Python<'_>) -> PyResult<Vec<std::collections::HashMap<String, String>>> {
+    // Release the GIL: this is a blocking network call.
+    let result = py.detach(|| {
+        utils::RT.block_on(async {
+            model_client::typesafe::list_models(model_client::http_client()).await
+        })
+    });
+
+    match result {
+        Ok(models) => Ok(models
+            .into_iter()
+            .map(|m| {
+                let mut map = std::collections::HashMap::new();
+                map.insert("name".to_string(), m.name);
+                if let Some(d) = m.description {
+                    map.insert("description".to_string(), d);
+                }
+                if let Some(r) = m.release_date {
+                    map.insert("release_date".to_string(), r);
+                }
+                map
+            })
+            .collect()),
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "TypeSafe list_models failed: {e}"
+        ))),
+    }
+}
+
 // Register expression functions with the Python module
 #[pyfunction]
 fn register_expressions(_py: Python<'_>) -> PyResult<&'static str> {
@@ -84,6 +121,9 @@ fn polar_llama(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Streaming inference entry point (bypasses the polars_expr/serde kwargs
     // boundary so it can receive a Python callback directly).
     m.add_function(wrap_pyfunction!(stream_pyfn::_stream_inference_batch, m)?)?;
+
+    // TypeSafe System One model catalogue (https://docs.typesafe.ai/api).
+    m.add_function(wrap_pyfunction!(_typesafe_list_models, m)?)?;
 
     Ok(())
 }

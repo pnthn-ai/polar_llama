@@ -18,6 +18,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Approximate Nearest Neighbor Search**: HNSW algorithm for fast semantic search and recommendations at scale.
 - **Prompt Optimization**: A DSPy-style optimization engine (`Signature`, `Predict`, `BootstrapFewShot`, `InstructionOptimizer`) that tunes instructions and few-shot demos against your labeled data using parallel batched evaluation.
 - **Tool Use / MCP**: Dataframe-native tool calling — LLMs emit tool calls as structured output, and `execute_tool_calls` runs every call of every row in parallel against an MCP server or a Python callable. See [docs/TOOL_USE.md](docs/TOOL_USE.md).
+- **TypeSafe System One**: A native Rust inference layer for the [TypeSafe API](https://docs.typesafe.ai/api) — typed, calibrated yes/no, choice and score questions answered per row, or one Pydantic **contract** applied to every line of a document in a single request, landing as ordinary typed columns with confidence you can threshold on. See [docs/TYPESAFE.md](docs/TYPESAFE.md).
 - **Prompt Caching**: Provider-native prompt caching (Anthropic 5m/1h `cache_control`) to share a cached system prefix across rows — pass `cache=True` with a `system_prompt`.
 
 #### Installation
@@ -746,6 +747,84 @@ result.summary   # one row per flag: flag, n_scored, n_flagged, rate, threshold,
 - **Documented, tunable thresholds**: every default threshold is a subjective convention, not a validated cutoff — see `docs/QUALITY_FLAGS.md` section 7.
 
 See `docs/QUALITY_FLAGS.md` for the full formulas, every default threshold, and the AI-detection limitation discussion.
+
+#### TypeSafe System One (Typed, Calibrated Decisions)
+
+TypeSafe is not a chat-completions provider: instead of a prompt and free text back, one request carries a `state` plus a map of typed **questions**, and returns one typed **answer** each — a yes/no probability (`noul`), a pick from a closed set with a full probability distribution (`choice`), or a probability-weighted rating over ordered levels (`score`). Because the answers are typed and calibrated rather than parsed out of prose, they land in the dataframe as ordinary numeric and string columns.
+
+Every question rides in the *same* request per row, which is TypeSafe's own "speculative fan-out" guidance — ask everything you might want up front, and let your code decide afterwards what to read.
+
+```python
+import polars as pl
+from polar_llama import typesafe_eval, noul, choice, score
+
+df = pl.DataFrame({"message": [
+    "Help! My payouts have been failing for 3 days.",
+    "Hi, just wondering what your enterprise pricing looks like.",
+]})
+
+out = df.with_columns(
+    ts=typesafe_eval(
+        pl.col("message"),
+        questions={
+            "is_urgent": noul("Does this convey urgency?",
+                              true="Explicitly time-sensitive",
+                              false="No urgency expressed"),
+            "department": choice("Which team should handle this?", {
+                "billing": "Payments, invoicing, refunds",
+                "technical": "Bugs, outages, integrations",
+                "sales": "Pricing, upgrades, new accounts",
+            }),
+            "frustration": score("How frustrated is the customer?",
+                                 ["Calm", "Frustrated", "Very angry"]),
+        },
+    )
+).unnest("ts")
+
+# message                 is_urgent  department  department_confidence  frustration  _error
+# "Help! My payouts…"     0.95       billing     0.79                   1.04         null
+# "Hi, just wondering…"   0.06       sales       1.0                    0.0          null
+
+# Confidence is the lever: act automatically, or route to a human.
+auto  = out.filter(pl.col("department_confidence") > 0.9)
+human = out.filter(pl.col("department_confidence") < 0.5)
+```
+
+- **Schema without a request**: output dtypes are derived from the questions, so `.collect_schema()` on a LazyFrame resolves the full shape without spending a token.
+- **Per-row failure isolation**: `_error` is always present and null on success; an all-null state is never sent at all. `429`/`529`/5xx retry with exponential backoff and jitter, while `401`/`422` fail fast rather than billing for a retry that cannot help.
+- **Opt-in detail**: `probabilities=True` adds the full distribution per question; `usage=True` adds the resolved model version plus token and latency accounting.
+
+Set `TYPESAFE_API_KEY` (and optionally `TYPESAFE_BASE_URL`). See [docs/TYPESAFE.md](docs/TYPESAFE.md) for the full output schema, structured state, and configuration.
+
+Define the struct you want as a Pydantic **contract** and apply it to every line of a document — all of a row's lines are answered in one request, so the model sees the surrounding lines as context and you don't pay for the document N times:
+
+```python
+from typing import Literal
+from pydantic import BaseModel, Field
+from polar_llama import typesafe_eval_each, score_field
+
+class ClauseFeatures(BaseModel):
+    is_payment: bool = Field(description="Does this clause create a payment obligation?")
+    category: Literal["fees", "term", "liability", "other"] = Field(description="What kind of clause?")
+    severity: float = score_field("How onerous for the Customer?", ["Benign", "Notable", "Onerous"])
+
+clauses = (
+    df.with_columns(clause=pl.col("contract_text").str.split("\n"))
+      .with_columns(f=typesafe_eval_each(pl.col("clause"), contract=ClauseFeatures))
+      .explode("f").unnest("f")
+)
+
+# doc  line_id  line                                is_payment  category  severity
+# msa  0        "Definitions. 'Services' means…"    0.03        other     0.00
+# msa  1        "Fees. Customer shall pay all…"     0.99        fees      0.12
+# msa  4        "Limitation of Liability. In no…"   0.04        liability 1.52
+
+clauses.filter(pl.col("is_payment") > 0.8)
+```
+
+Measured against the live API on an 8-clause contract, batching a document's lines into one request is **3.2x fewer input tokens and 8x fewer round trips** than a request per line — and it is the only version that keeps context. Documents longer than `max_questions` are chunked automatically and fired concurrently, with `line_id` staying global.
+
+Field types pick the question type: `bool` → Noul (a probability, which you threshold), `Literal[...]`/`Enum` → Choice, numeric + `score_field(levels=...)` → Score. A plain `str` field is rejected with an explanation — TypeSafe answers are typed over a closed set and there is no free-text primitive.
 
 #### Tool Use and MCP
 

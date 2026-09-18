@@ -7,11 +7,22 @@ edition = "2021"
 name = "polar_llama"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# `extension-module` tells pyo3 to leave the CPython symbols undefined, which
+# is required for the importable wheel and is what maturin builds. It also
+# makes the crate impossible to LINK into a test binary, so it is a default
+# feature rather than an unconditional one: `cargo test --no-default-features`
+# links against libpython instead and can actually run the `#[cfg(test)]`
+# modules. Default features are unchanged, so maturin/`cargo build` behave
+# exactly as before.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [build-dependencies]
 pyo3-build-config = "0.27"
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.27", features = ["abi3-py39"] }
 pyo3-polars = { version = "0.26", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
