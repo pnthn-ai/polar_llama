@@ -17,6 +17,8 @@ import sys
 import polars as pl
 import pytest
 
+from helpers import assert_import_stays_mlx_free, assert_stays_mlx_free
+
 from polar_llama import embedding_local
 from polar_llama.index import HnswIndex
 from polar_llama.local.embed import (
@@ -181,8 +183,20 @@ def test_env_override_forces_fake(monkeypatch):
 
     assert result.schema["emb"] == pl.List(pl.Float64)
     assert result["emb"].null_count() == 0
-    assert "mlx" not in sys.modules
-    assert "mlx_embeddings" not in sys.modules
+
+    # The "forces fake" half of the claim -- that this path never reaches for
+    # mlx -- is only meaningful in a fresh interpreter: in-process, mlx may
+    # already be in sys.modules because another test imported it.
+    assert_stays_mlx_free(
+        "import os\n"
+        "os.environ['POLAR_LLAMA_LOCAL_ENGINE'] = 'fake'\n"
+        "import polars as pl\n"
+        "from polar_llama import embedding_local\n"
+        "pl.DataFrame({'text': ['hello', 'world']}).with_columns(\n"
+        "    emb=embedding_local(pl.col('text'), model='whatever-model',\n"
+        "                        engine='in_process'))\n",
+        what="the fake embedding path",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,11 +227,11 @@ def test_fail_marker_yields_null(monkeypatch):
 # 10. importing the module never imports mlx
 # ---------------------------------------------------------------------------
 def test_import_embed_module_does_not_import_mlx():
+    """Checked out-of-process -- see the note in test_local_ci_smoke.py."""
     import polar_llama.local.embed as embed_module
 
     assert embed_module is not None
-    assert "mlx" not in sys.modules
-    assert "mlx_embeddings" not in sys.modules
+    assert_import_stays_mlx_free(["polar_llama.local.embed"])
 
 
 # ---------------------------------------------------------------------------

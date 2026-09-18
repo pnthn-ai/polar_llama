@@ -20,6 +20,8 @@ import os
 import threading
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from helpers import BacklogHTTPServer
 from typing import Optional
 
 import polars as pl
@@ -104,7 +106,7 @@ def _echo_responder(body: dict):
 
 @pytest.fixture
 def mock_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockUsageHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _MockUsageHandler)
     server.lock = threading.Lock()
     server.requests_received = []
     server.responder = _echo_responder
@@ -119,7 +121,20 @@ def mock_server():
 
 
 @pytest.fixture(autouse=True)
-def _mock_env(monkeypatch):
+def _mock_env(request, monkeypatch):
+    # The gated real-API test needs the caller's actual credentials. Without
+    # this opt-out the autouse fixture overwrote OPENAI_API_KEY with
+    # "test-key" for EVERY test in the module, so that test could only ever
+    # 401 -- it looked healthy purely because it is normally skipped, and
+    # started failing the moment another module's load_dotenv() put real keys
+    # in the environment and un-skipped it.
+    if request.node.get_closest_marker("real_api"):
+        # A live test must reach the real provider, so make sure no mock
+        # base URL leaked in from an earlier module.
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        yield
+        return
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     yield
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -547,7 +562,7 @@ class _MockAnthropicHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def anthropic_mock_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockAnthropicHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _MockAnthropicHandler)
     server.usage_block = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -645,27 +660,76 @@ def test_inference_local_in_process_usage_false_unchanged(_clean_local_registry)
 # ============================================================================
 
 
+def _accounted_rows(column, provider: str) -> list:
+    """The rows that actually came back, failing clearly if none did.
+
+    An API error leaves that row's whole `usage=True` struct null, so indexing
+    it would otherwise die with a bare ``TypeError: 'NoneType' object is not
+    subscriptable``. Rows the provider refused are skipped, because a
+    partially rate-limited batch is an artifact of the account's tier rather
+    than a usage-accounting bug -- but every row that DID come back still has
+    to account correctly.
+
+    A batch where *nothing* came back fails loudly and deliberately is NOT a
+    skip: this test exists to prove the live path works, and skipping on any
+    failure would hide an auth or connectivity regression -- exactly the class
+    of bug the autouse-fixture mix-up above was.
+    """
+    rows = [row for row in column if row is not None]
+    if not rows:
+        raise AssertionError(
+            f"No response from {provider} for any row. The provider's own error "
+            f"was printed to stderr above -- check the API key is valid and the "
+            f"account has credit. (Run with `-m \"not real_api\"` to skip the "
+            f"live-billing tests entirely.)"
+        )
+    return rows
+
+
+@pytest.fixture
+def _gentle_concurrency(monkeypatch):
+    """Keep the live tests inside a modest provider rate limit.
+
+    The default fan-out (64 in flight) trips 429s on a low-tier account, which
+    shows up as a scatter of null rows rather than anything to do with usage
+    accounting.
+    """
+    monkeypatch.setenv("POLAR_LLAMA_MAX_CONCURRENCY", "2")
+
+
+@pytest.mark.real_api
 @pytest.mark.skipif(
-    not (os.getenv("OPENAI_API_KEY") and os.getenv("ANTHROPIC_API_KEY")),
-    reason="requires OPENAI_API_KEY and ANTHROPIC_API_KEY",
+    not os.getenv("OPENAI_API_KEY"), reason="requires OPENAI_API_KEY"
 )
-def test_real_api_usage_accounting_openai_and_anthropic():
+def test_real_api_usage_accounting_openai(_gentle_concurrency):
     df = pl.DataFrame(
-        {"prompt": [f"Say the number {i} and nothing else." for i in range(10)]}
+        {"prompt": [f"Say the number {i} and nothing else." for i in range(6)]}
     )
 
-    out_openai = df.with_columns(
+    out = df.with_columns(
         r=inference_async(
             pl.col("prompt"), provider=Provider.OPENAI, model="gpt-4o-mini", usage=True
         )
     )
-    for row in out_openai["r"]:
+    for row in _accounted_rows(out["r"], "OpenAI"):
         u = row["usage"]
         assert u["input_tokens"] > 0
         assert u["output_tokens"] > 0
         assert u["cost_usd"] is not None and u["cost_usd"] >= 0
 
-    out_anthropic = df.with_columns(
+
+@pytest.mark.real_api
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"), reason="requires ANTHROPIC_API_KEY"
+)
+def test_real_api_usage_accounting_anthropic(_gentle_concurrency):
+    """Split from the OpenAI proof: one provider being out of credit (or having
+    a revoked key) must not take down the other provider's verification."""
+    df = pl.DataFrame(
+        {"prompt": [f"Say the number {i} and nothing else." for i in range(6)]}
+    )
+
+    out = df.with_columns(
         r=inference_async(
             pl.col("prompt"),
             provider=Provider.ANTHROPIC,
@@ -673,15 +737,17 @@ def test_real_api_usage_accounting_openai_and_anthropic():
             usage=True,
         )
     )
+    rows = _accounted_rows(out["r"], "Anthropic")
+
     total_cost = 0.0
-    for row in out_anthropic["r"]:
+    for row in rows:
         u = row["usage"]
         assert u["input_tokens"] > 0
         assert u["output_tokens"] > 0
         assert u["cost_usd"] is not None
         total_cost += u["cost_usd"]
 
-    # Verify the cost formula against the providers' own reported usage
+    # Verify the cost formula against the provider's own reported usage
     # (exact billing isn't queryable in-test, so this checks the formula,
     # not a ground-truth invoice).
     price = pricing.resolve_price("anthropic", "claude-haiku-4-5")
@@ -692,6 +758,6 @@ def test_real_api_usage_accounting_openai_and_anthropic():
             row["usage"]["cached_tokens"],
             price,
         )
-        for row in out_anthropic["r"]
+        for row in rows
     )
     assert total_cost == pytest.approx(hand_total, rel=0.01, abs=0.01)

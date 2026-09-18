@@ -25,6 +25,8 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from helpers import BacklogHTTPServer
 from typing import Callable
 
 import polars as pl
@@ -601,7 +603,7 @@ def _echo_responder(body: dict):
 
 @pytest.fixture
 def mock_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockOpenAIHandler)
+    server = BacklogHTTPServer(("127.0.0.1", 0), _MockOpenAIHandler)
     server.lock = threading.Lock()
     server.requests_received = []
     server.responder = _echo_responder
