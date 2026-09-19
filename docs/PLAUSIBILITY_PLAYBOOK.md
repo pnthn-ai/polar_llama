@@ -1,4 +1,4 @@
-# A written playbook: checking data is self-consistent
+# A written playbook: checking records are plausible
 
 ## What this is for
 
@@ -25,9 +25,9 @@ So you do not write rules. You ask one question —
 combination nobody thought to check.
 
 ```python
-from polar_llama import self_consistency, playbook_eval
+from polar_llama import plausibility_check, assess
 
-flags = playbook_eval(df, self_consistency("employee record"), by="employee_id")
+flags = assess(df, plausibility_check("employee record"), by="employee_id")
 
 flags.sort("review_priority", descending=True).head(20)   # your triage queue
 ```
@@ -56,7 +56,7 @@ fields are still perfectly fine — and the model is being asked to render a
 verdict on the whole thing. A graded "how much does this deserve a human's
 time?" asks the question you actually mean, and separates cleanly.
 
-`consistency()` therefore returns a **score**. This is not a stylistic choice.
+`plausibility()` therefore returns a **score**. This is not a stylistic choice.
 
 ## It needs dimensions to cross-check
 
@@ -94,7 +94,7 @@ unit, the window and the direction: `days_taken_last_12_months`, not `days`.
 
 ## Reading the output
 
-`self_consistency` gives you two columns and a confidence:
+`plausibility_check` gives you two columns and a confidence:
 
 | column | meaning |
 |---|---|
@@ -131,7 +131,7 @@ not predict, and each confirmed one becomes a cheap deterministic check.
 - **Not an audit trail.** Use it to find things, then verify them with code or
   a human before acting on anyone.
 - **Not for rules you can already express.** If Polars can compute it, Polars
-  should — see `compute=` in [PLAYBOOKS.md](PLAYBOOKS.md).
+  should — see `compute=` in [ASSESSMENT.md](ASSESSMENT.md).
 - **Not reliable on narrow records.** Under roughly ten meaningful fields,
   treat the ranking as unproven on your data.
 

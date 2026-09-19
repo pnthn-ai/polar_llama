@@ -2094,19 +2094,19 @@ from polar_llama.typesafe import list_models as typesafe_models
 
 
 # ============================================================================
-# Playbooks — business rules evaluated across many rows — see docs/PLAYBOOKS.md
+# Rule assessment across many rows — see docs/ASSESSMENT.md
 # ============================================================================
 
-from polar_llama.playbook import (
-    DEFAULT_CONSISTENCY_ASPECTS,
+from polar_llama.assess import (
     DEFAULT_MAX_ROWS_PER_GROUP,
+    DEFAULT_PLAUSIBILITY_ASPECTS,
     DEFAULT_REVIEW_LEVELS,
-    Playbook,
-    consistency,
-    playbook,
-    playbook_eval,
+    RuleSet,
+    assess,
+    plausibility,
+    plausibility_check,
     rule,
-    self_consistency,
+    ruleset,
 )
 
 

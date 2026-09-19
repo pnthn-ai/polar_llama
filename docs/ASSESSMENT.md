@@ -1,11 +1,11 @@
-# Playbooks
+# Rule assessment across many rows
 
 ## Overview
 
-A **playbook** is a set of business rules evaluated against *many rows at once*.
+A **ruleset** is a set of business rules evaluated against *many rows at once*.
 
 `typesafe_eval` judges one row. `typesafe_eval_each` judges each segment of a
-document. A playbook judges a **group of rows together** — the shape you need
+document. A ruleset judges a **group of rows together** — the shape you need
 for a rule that no single row can violate:
 
 > "Every escalated ticket must get a support reply."
@@ -28,13 +28,13 @@ the judgment is semantic ("does this justification actually justify it?") or
 because you would have to predict every edge case in advance and you cannot.
 For that second kind — *is this record self-consistent across all its
 dimensions?* — see the written playbook in
-**[CONSISTENCY_PLAYBOOK.md](CONSISTENCY_PLAYBOOK.md)**, which is the shape most
+**[PLAUSIBILITY_PLAYBOOK.md](PLAUSIBILITY_PLAYBOOK.md)**, which is the shape most
 people actually want:
 
 ```python
-from polar_llama import self_consistency, playbook_eval
+from polar_llama import plausibility_check, assess
 
-flags = playbook_eval(df, self_consistency("employee record"), by="employee_id")
+flags = assess(df, plausibility_check("employee record"), by="employee_id")
 flags.sort("review_priority", descending=True).head(20)   # triage queue, no rules written
 ```
 
@@ -43,15 +43,15 @@ ground truth, **not** because it is a good use of a model. It is deliberately
 the case where you should reach for `compute=`.
 
 ```python
-from polar_llama import playbook, rule, playbook_eval
+from polar_llama import playbook, rule, assess
 
-policy = playbook(
+policy = ruleset(
     "expense_policy",
     within_limit = rule("No employee may claim more than $5,000 in total."),
     receipts     = rule("Every claim over $75 must reference a receipt."),
 )
 
-verdicts = playbook_eval(
+verdicts = assess(
     df,
     policy,
     by="employee",                                     # one verdict per employee
@@ -101,7 +101,7 @@ data become **indistinguishable**, and it flags everything. This is not
 specific to arithmetic: a purely semantic rule (one un-answered support ticket
 among many) separated cleanly at 11 rows and was **missed** at 59.
 
-So `playbook_eval` groups, and warns when a group exceeds
+So `assess` groups, and warns when a group exceeds
 `max_rows_per_group` (default 25).
 
 ### 2. Let Polars do the arithmetic
@@ -186,7 +186,7 @@ python -m pytest tests/test_playbook.py -q
 
 ## See also
 
-- **[CONSISTENCY_PLAYBOOK.md](CONSISTENCY_PLAYBOOK.md)** — the written playbook
+- **[PLAUSIBILITY_PLAYBOOK.md](PLAUSIBILITY_PLAYBOOK.md)** — the written playbook
   for checking records are self-consistent across many dimensions, without
   enumerating rules. Includes the measured reason to use a *score* rather than
   a yes/no, and why record width and column naming dominate the result.

@@ -1,7 +1,7 @@
 """Business rules evaluated against *many rows* at once.
 
 `typesafe_eval` judges one row. `typesafe_eval_each` judges each segment of a
-document. A **playbook** judges a *set of rows together* -- the shape you need
+document. A **ruleset** judges a *set of rows together* -- the shape you need
 for a rule no single row can violate:
 
     "No employee may claim more than $5,000 in total."
@@ -9,7 +9,7 @@ for a rule no single row can violate:
     "Discounts above 20% need a stated justification."
 
 Rows are grouped, each group's rows become a JSON array of records, and every
-rule in the playbook is answered for that group in one request. Groups are
+rule in the ruleset is answered for that group in one request. Groups are
 evaluated in parallel under the shared concurrency bound, with the retry and
 per-row error isolation the TypeSafe client already provides.
 
@@ -20,7 +20,7 @@ answer separated cleanly at 6 rows per group (0.33 violating vs 0.98 clean),
 was marginal at 20 (0.40 vs 0.49), and had collapsed by 60 (0.20 vs 0.39) --
 violating and clean data became indistinguishable. A purely semantic rule (one
 un-answered ticket among many) held at 11 rows and was missed at 59. So a
-playbook groups, and warns when a group gets big enough to lose the signal.
+`assess` groups, and warns when a group gets big enough to lose the signal.
 
 **Let Polars do the arithmetic.** Feeding the model a pre-computed aggregate
 instead of raw rows to add up was exact at every size tested, up to 1,000 rows
@@ -45,13 +45,13 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_MAX_ROWS_PER_GROUP",
     "DEFAULT_REVIEW_LEVELS",
-    "DEFAULT_CONSISTENCY_ASPECTS",
-    "Playbook",
+    "DEFAULT_PLAUSIBILITY_ASPECTS",
+    "RuleSet",
     "rule",
-    "consistency",
-    "self_consistency",
-    "playbook",
-    "playbook_eval",
+    "plausibility",
+    "plausibility_check",
+    "ruleset",
+    "assess",
 ]
 
 #: Levels for a review-priority score. Ordered, lowest concern first.
@@ -64,7 +64,7 @@ DEFAULT_REVIEW_LEVELS = [
 #: A small, GENERIC taxonomy of where an inconsistency tends to live. Generic
 #: on purpose: naming aspects is not the same as enumerating edge cases, and
 #: the point of a consistency check is that you do not have to predict them.
-DEFAULT_CONSISTENCY_ASPECTS = {
+DEFAULT_PLAUSIBILITY_ASPECTS = {
     "nothing": "The record is coherent",
     "time": "Dates, durations, or sequence do not fit together",
     "amounts": "Quantities, money, or sizes do not fit together",
@@ -129,7 +129,7 @@ def rule(
     )
 
 
-def consistency(
+def plausibility(
     subject: str = "record",
     *,
     levels: Optional[Sequence[Any]] = None,
@@ -170,7 +170,7 @@ def consistency(
 
     Examples
     --------
-    >>> consistency("employee record")  # doctest: +ELLIPSIS
+    >>> plausibility("employee record")  # doctest: +ELLIPSIS
     {'type': 'score', ...}
     """
     instructions: Dict[str, Any] = {
@@ -191,21 +191,21 @@ def consistency(
     return score(instructions, list(levels) if levels else DEFAULT_REVIEW_LEVELS)
 
 
-def self_consistency(
+def plausibility_check(
     subject: str = "record",
     *,
-    name: str = "self_consistency",
+    name: str = "plausibility_check",
     levels: Optional[Sequence[Any]] = None,
     aspects: Optional[Mapping[str, Any]] = None,
     notable: Optional[Sequence[str]] = None,
-) -> "Playbook":
-    """A ready-made playbook that checks records hang together.
+) -> "RuleSet":
+    """A ready-made ruleset that checks records hang together.
 
     Point it at any frame. Two rules, both deliberately generic:
 
     ``review_priority``
         A graded score -- the signal that actually separates (see
-        :func:`consistency`).
+        :func:`plausibility`).
     ``where``
         Which *aspect* the problem lives in, from a small generic taxonomy.
         Naming aspects is not enumerating edge cases: it tells a reviewer where
@@ -219,23 +219,23 @@ def self_consistency(
 
     Examples
     --------
-    >>> pb = self_consistency("employee record")
+    >>> pb = plausibility_check("employee record")
     >>> list(pb.rules)
     ['review_priority', 'where']
     """
-    return Playbook(
+    return RuleSet(
         name,
         {
-            "review_priority": consistency(subject, levels=levels, notable=notable),
+            "review_priority": plausibility(subject, levels=levels, notable=notable),
             "where": choice(
                 f"If something is off with this {subject}, which aspect is the source?",
-                dict(aspects) if aspects else DEFAULT_CONSISTENCY_ASPECTS,
+                dict(aspects) if aspects else DEFAULT_PLAUSIBILITY_ASPECTS,
             ),
         },
     )
 
 
-class Playbook:
+class RuleSet:
     """A named, ordered set of business rules.
 
     Reusable across frames and runs: define the policy once, apply it wherever
@@ -243,8 +243,8 @@ class Playbook:
 
     Examples
     --------
-    >>> from polar_llama import playbook, rule
-    >>> expenses = playbook(
+    >>> from polar_llama import ruleset, rule
+    >>> expenses = ruleset(
     ...     "expense_policy",
     ...     within_limit=rule("No employee may claim more than $5,000 in total."),
     ...     receipts=rule("Every claim over $75 must reference a receipt."),
@@ -255,26 +255,26 @@ class Playbook:
 
     def __init__(self, name: str, rules: Mapping[str, Any]):
         if not name or not isinstance(name, str):
-            raise ValueError("A playbook needs a non-empty name")
+            raise ValueError("A ruleset needs a non-empty name")
         if not rules:
-            raise ValueError(f"Playbook {name!r} declares no rules")
+            raise ValueError(f"RuleSet {name!r} declares no rules")
         self.name = name
         self.rules: Dict[str, Any] = dict(rules)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        return f"Playbook({self.name!r}, rules={list(self.rules)})"
+        return f"RuleSet({self.name!r}, rules={list(self.rules)})"
 
     def __len__(self) -> int:
         return len(self.rules)
 
 
-def playbook(name: str, **rules: Any) -> Playbook:
-    """Build a named :class:`Playbook` from keyword rules.
+def ruleset(name: str, **rules: Any) -> RuleSet:
+    """Build a named :class:`RuleSet` from keyword rules.
 
     Each keyword becomes a rule id and an output column. Declaration order is
     preserved.
     """
-    return Playbook(name, rules)
+    return RuleSet(name, rules)
 
 
 # ============================================================================
@@ -290,9 +290,9 @@ def _as_list(value: Optional[Union[str, Sequence[str]]]) -> List[str]:
     return list(value)
 
 
-def playbook_eval(
+def assess(
     df: pl.DataFrame,
-    playbook: Playbook,
+    ruleset: RuleSet,
     *,
     by: Optional[Union[str, Sequence[str]]] = None,
     records: Optional[Sequence[str]] = None,
@@ -302,13 +302,13 @@ def playbook_eval(
     usage: bool = False,
     max_rows_per_group: int = DEFAULT_MAX_ROWS_PER_GROUP,
 ) -> pl.DataFrame:
-    """Evaluate a playbook against each group of rows.
+    """Evaluate a ruleset against each group of rows.
 
     Parameters
     ----------
     df
         The rows to judge.
-    playbook
+    ruleset
         The rules to apply. Every rule is answered in the *same* request per
         group, so asking more rules costs little beyond their own answers.
     by
@@ -354,13 +354,13 @@ def playbook_eval(
     Examples
     --------
     >>> import polars as pl
-    >>> from polar_llama import playbook, rule, playbook_eval
+    >>> from polar_llama import ruleset, rule, assess
     >>>
-    >>> expenses = playbook(
+    >>> expenses = ruleset(
     ...     "expense_policy",
     ...     within_limit=rule("No employee may claim more than $5,000 in total."),
     ... )
-    >>> verdicts = playbook_eval(
+    >>> verdicts = assess(
     ...     df,
     ...     expenses,
     ...     by="employee",
@@ -369,13 +369,13 @@ def playbook_eval(
     ... )  # doctest: +SKIP
     >>> verdicts.filter(pl.col("within_limit") < 0.5)  # doctest: +SKIP
     """
-    if not isinstance(playbook, Playbook):
+    if not isinstance(ruleset, RuleSet):
         raise TypeError(
-            f"playbook must be a Playbook (see polar_llama.playbook()), got "
-            f"{type(playbook).__name__}"
+            f"ruleset must be a RuleSet (see polar_llama.ruleset()), got "
+            f"{type(ruleset).__name__}"
         )
     if df.is_empty():
-        raise ValueError("playbook_eval needs at least one row")
+        raise ValueError("assess needs at least one row")
 
     keys = _as_list(by)
     for k in keys:
@@ -388,10 +388,10 @@ def playbook_eval(
         if name in keys:
             raise ValueError(f"compute name {name!r} collides with a group key")
         if name in reserved:
-            raise ValueError(f"compute name {name!r} is reserved by playbook_eval")
+            raise ValueError(f"compute name {name!r} is reserved by assess")
     for name in (context or {}):
         if name in reserved:
-            raise ValueError(f"context name {name!r} is reserved by playbook_eval")
+            raise ValueError(f"context name {name!r} is reserved by assess")
 
     if records is None:
         record_cols = [c for c in df.columns if c not in keys and c not in computed]
@@ -422,7 +422,7 @@ def playbook_eval(
     biggest = int(grouped["row_count"].max() or 0)
     if biggest > max_rows_per_group:
         warnings.warn(
-            f"playbook {playbook.name!r}: largest group has {biggest} rows "
+            f"ruleset {ruleset.name!r}: largest group has {biggest} rows "
             f"(max_rows_per_group={max_rows_per_group}). A single violation "
             f"measurably gets lost in groups this large -- separation between "
             f"clean and violating data collapses past ~20 rows. Group more "
@@ -438,7 +438,7 @@ def playbook_eval(
         state.append(pl.lit(value).alias(name))
 
     out = grouped.with_columns(
-        _verdict=typesafe_eval(*state, questions=playbook.rules, model=model, usage=usage)
+        _verdict=typesafe_eval(*state, questions=ruleset.rules, model=model, usage=usage)
     ).unnest("_verdict")
 
     # `records` was the payload; `row_count` stays, since it is how a caller
