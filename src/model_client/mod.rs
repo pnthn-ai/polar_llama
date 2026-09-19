@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod groq;
 pub mod bedrock;
+pub mod typesafe;
 pub mod streaming;
 
 pub use streaming::{StreamEvent, stream_batch};

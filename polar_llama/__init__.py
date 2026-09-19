@@ -2076,6 +2076,24 @@ from polar_llama.index import (
 
 
 # ============================================================================
+# TypeSafe System One — typed evaluation (https://docs.typesafe.ai/api)
+# ============================================================================
+
+from polar_llama.typesafe import (
+    DEFAULT_TYPESAFE_MODEL,
+    choice,
+    choice_field,
+    contract_questions,
+    noul,
+    score,
+    score_field,
+    typesafe_eval,
+    typesafe_eval_each,
+)
+from polar_llama.typesafe import list_models as typesafe_models
+
+
+# ============================================================================
 # Deterministic Run Manifests (issue #85) — see docs/RUN_MANIFESTS.md
 # ============================================================================
 
@@ -2342,6 +2360,87 @@ class LlamaNamespace:
         Tag documents according to a taxonomy definition.
         """
         return tag_taxonomy(self._expr, taxonomy, provider=provider, model=model)
+
+    def typesafe_eval(
+        self,
+        *extra_state: "IntoExpr",
+        questions: Dict[str, Any],
+        model: Optional[str] = None,
+        probabilities: bool = False,
+        usage: bool = False,
+        state_json: bool = False,
+    ) -> pl.Expr:
+        """
+        Evaluate this column against typed TypeSafe System One questions.
+
+        Answers come back as a Struct -- `.unnest()` it to get one ordinary
+        column per answer. See :func:`polar_llama.typesafe_eval`.
+
+        Parameters
+        ----------
+        *extra_state
+            Further columns to fold into the state; with any given, the state
+            becomes a JSON object keyed by column name instead of this
+            column's bare value. A length-1 input broadcasts, so a constant
+            can ride along with per-row state.
+        questions
+            Mapping of question id to a :func:`noul` / :func:`choice` /
+            :func:`score` spec. Insertion order fixes output column order.
+        model
+            System One model. Defaults to ``"jev-latest"``.
+        probabilities
+            Also emit the full distribution for choice/score questions.
+        usage
+            Also emit `_model` and per-row token/latency accounting.
+        state_json
+            Treat string inputs as pre-encoded JSON documents.
+
+        Returns
+        -------
+        polars.Expr
+            A Struct expression, always including a null-on-success `_error`.
+        """
+        return typesafe_eval(
+            self._expr,
+            *extra_state,
+            questions=questions,
+            model=model,
+            probabilities=probabilities,
+            usage=usage,
+            state_json=state_json,
+        )
+
+    def typesafe_eval_each(
+        self,
+        *context: "IntoExpr",
+        questions: Optional[Dict[str, Any]] = None,
+        contract: Optional[Type["BaseModel"]] = None,
+        model: Optional[str] = None,
+        probabilities: bool = False,
+        usage: bool = False,
+        include_segment: bool = True,
+        max_questions: int = 200,
+    ) -> pl.Expr:
+        """
+        Apply one contract to every segment of this List column, per row.
+
+        All of a row's segments are evaluated in one request (chunked to
+        respect `max_questions`), so N segments do not cost N calls and the
+        model sees the neighbouring segments as context. Returns
+        `List[Struct{line_id, line, <answers>, _error}]` -- `.explode()` it for
+        one row per segment. See :func:`polar_llama.typesafe_eval_each`.
+        """
+        return typesafe_eval_each(
+            self._expr,
+            *context,
+            questions=questions,
+            contract=contract,
+            model=model,
+            probabilities=probabilities,
+            usage=usage,
+            include_segment=include_segment,
+            max_questions=max_questions,
+        )
 
     def embedding(
         self,

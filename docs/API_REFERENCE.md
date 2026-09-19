@@ -20,6 +20,8 @@ Complete reference documentation for all Polar Llama expressions and functions.
   - [euclidean_distance](#euclidean_distance)
   - [knn_hnsw](#knn_hnsw)
   - [embedding_async](#embedding_async)
+  - [typesafe_eval](#typesafe_eval)
+  - [typesafe_eval_each](#typesafe_eval_each)
   - [Inter-rater Reliability (cohens_kappa, krippendorffs_alpha)](#inter-rater-reliability)
 - [Data Types](#data-types)
 - [Error Handling](#error-handling)
@@ -72,6 +74,8 @@ Polar Llama registers a `.llama` namespace on Polars expressions, providing a fl
 | `.llama.cosine_similarity(other)` | Calculate cosine similarity between vectors |
 | `.llama.dot_product(other)` | Calculate dot product between vectors |
 | `.llama.euclidean_distance(other)` | Calculate Euclidean distance between vectors |
+| `.llama.typesafe_eval(questions=...)` | TypeSafe System One typed evaluation (noul/choice/score) |
+| `.llama.typesafe_eval_each(contract=...)` | Apply one contract to every segment of a List column |
 | `.llama.execute_tool_calls(...)` | Execute emitted tool calls batch-parallel (MCP or Python executor) |
 | `.llama.tool_results_to_message(role='user')` | Render tool results as a message for synthesis |
 
@@ -147,6 +151,9 @@ Configure API keys using environment variables:
 | Gemini | `GEMINI_API_KEY` | `AIza...` |
 | Groq | `GROQ_API_KEY` | `gsk_...` |
 | AWS Bedrock | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Multiple vars |
+| TypeSafe | `TYPESAFE_API_KEY` | `apikey_...` |
+
+TypeSafe is a typed-evaluation API rather than a chat provider, so it is not a member of the `Provider` enum and is reached through [`typesafe_eval`](#typesafe_eval) instead of the inference expressions. `TYPESAFE_BASE_URL` overrides its API root (default `https://api.typesafe.ai`).
 
 ### Default Models
 
@@ -1085,6 +1092,165 @@ df = df.with_columns(
     )
 )
 ```
+
+---
+
+### typesafe_eval
+
+Evaluate each row against typed [TypeSafe System One](https://docs.typesafe.ai/api)
+questions. Every question is answered in a single request per row, and the
+answers come back as a Struct to `.unnest()`.
+
+```python
+typesafe_eval(
+    *state: IntoExpr,
+    questions: Mapping[str, dict],
+    model: str | None = None,
+    probabilities: bool = False,
+    usage: bool = False,
+    state_json: bool = False,
+) -> pl.Expr
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `*state` | `IntoExpr` | required | One expression is sent as a bare value; several are sent as a JSON object keyed by column name. `List`/`Struct` columns convert to JSON arrays/objects; a length-1 input broadcasts |
+| `questions` | `Mapping[str, dict]` | required | Question id -> `noul()` / `choice()` / `score()` spec (raw TypeSafe question JSON also accepted). Insertion order fixes column order |
+| `model` | `str` | `"jev-latest"` | System One model |
+| `probabilities` | `bool` | `False` | Also emit the full distribution per choice/score question |
+| `usage` | `bool` | `False` | Also emit `_model`, `_input_tokens`, `_output_tokens`, `_latency_ms` |
+| `state_json` | `bool` | `False` | Treat string inputs as pre-encoded JSON documents |
+
+**Question builders:**
+
+| Builder | Signature | Answer columns |
+|---------|-----------|----------------|
+| `noul` | `noul(instructions, *, true=None, false=None)` | `<id>`: Float64 (probability of yes) |
+| `choice` | `choice(instructions, criteria)` | `<id>`: String, `<id>_confidence`: Float64 |
+| `score` | `score(instructions, criteria)` | `<id>`: Float64, `<id>_confidence`: Float64 |
+
+`choice` criteria is a mapping of `option -> description` (or a bare sequence of
+option names); `score` criteria is an ordered sequence of level descriptions,
+lowest first. Both need at least two entries. A noul has no confidence column --
+TypeSafe returns none, because a single probability already is the distribution.
+
+**Returns:** Struct expression. `_error` is always present and null on success.
+
+**Example:**
+```python
+import polars as pl
+from polar_llama import typesafe_eval, noul, choice, score
+
+out = df.with_columns(
+    ts=typesafe_eval(
+        pl.col("message"),
+        questions={
+            "is_urgent": noul("Does this convey urgency?"),
+            "department": choice("Which team should handle this?", {
+                "billing": "Payments, invoicing, refunds",
+                "technical": "Bugs, outages, integrations",
+            }),
+            "frustration": score("How frustrated is the customer?",
+                                 ["Calm", "Frustrated", "Very angry"]),
+        },
+        probabilities=True,
+    )
+).unnest("ts")
+
+# Confidence gates the action; the threshold scales with the stakes.
+auto = out.filter(pl.col("department_confidence") > 0.9)
+```
+
+**Notes:**
+- Output dtypes are derived from the questions, so `.collect_schema()` resolves the full shape without calling the API.
+- A row whose state is entirely null is never sent and returns all-null with a null `_error`.
+- A failing row populates `_error` while every other row still resolves.
+- `429`/`529`/5xx retry with exponential backoff (`POLAR_LLAMA_TYPESAFE_MAX_RETRIES`, default 3); `401`/`422` fail fast.
+- `typesafe_models()` lists the model catalogue available to your key.
+
+See [TYPESAFE.md](TYPESAFE.md) for the full guide.
+
+---
+
+### typesafe_eval_each
+
+Apply one contract to **every segment** of a document, per row. All of a row's
+segments are evaluated together in one request (chunked to respect
+`max_questions`), so N segments do not cost N calls and the model sees the
+neighbouring segments as context.
+
+```python
+typesafe_eval_each(
+    segments: IntoExpr,
+    *context: IntoExpr,
+    questions: Mapping[str, dict] | None = None,
+    contract: type[BaseModel] | None = None,
+    model: str | None = None,
+    probabilities: bool = False,
+    usage: bool = False,
+    include_segment: bool = True,
+    max_questions: int = 200,
+) -> pl.Expr
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `segments` | `IntoExpr` | required | A `List` column — one list of segments per row |
+| `*context` | `IntoExpr` | — | Extra columns folded into every request's state as shared context; length-1 broadcasts |
+| `questions` | `Mapping` | — | Question id -> spec. Mutually exclusive with `contract` |
+| `contract` | `BaseModel` | — | Pydantic model of the features to extract. Mutually exclusive with `questions` |
+| `model` | `str` | `"jev-latest"` | System One model |
+| `probabilities` | `bool` | `False` | Also emit the full distribution per choice/score question |
+| `usage` | `bool` | `False` | Also emit `_model` and per-request token/latency accounting |
+| `include_segment` | `bool` | `True` | Emit the segment's text as a `line` column |
+| `max_questions` | `int` | `200` | Questions per request; segments are chunked to respect it |
+
+**Returns:** `List[Struct{line_id, line, <answers>, _error}]` — one entry per
+segment, in order. `.explode()` for one row per segment.
+
+**Contracts:** a Pydantic model whose fields name the features to extract.
+
+| Field type | Question | Answer |
+|---|---|---|
+| `bool` | Noul | probability in `[0, 1]` |
+| `Literal[...]` / `Enum` | Choice | the pick + `<field>_confidence` |
+| numeric + `score_field(levels=...)` | Score | weighted value + `<field>_confidence` |
+
+`Field(description=...)` becomes the question's instructions. A plain `str`
+field raises — TypeSafe has no free-text primitive. Use `contract_questions(Model)`
+to inspect the conversion, `choice_field(...)` for per-option rubrics, and
+`score_field(...)` to declare score levels.
+
+**Example:**
+```python
+from typing import Literal
+from pydantic import BaseModel, Field
+from polar_llama import typesafe_eval_each, score_field
+
+class ClauseFeatures(BaseModel):
+    is_payment: bool = Field(description="Does this clause create a payment obligation?")
+    category: Literal["fees", "term", "liability", "other"] = Field(description="Clause type?")
+    severity: float = score_field("How onerous?", ["Benign", "Notable", "Onerous"])
+
+clauses = (
+    df.with_columns(clause=pl.col("text").str.split("\n"))
+      .with_columns(f=typesafe_eval_each(pl.col("clause"), contract=ClauseFeatures))
+      .explode("f").unnest("f")
+)
+```
+
+**Notes:**
+- 3.2x fewer input tokens and 8x fewer round trips than one request per line (measured, 8-clause contract).
+- The ceiling is token-based: 640 questions (~40k input tokens) succeeded live, 1200 returned `400 max_tokens_exceeded`. Lower `max_questions` for long segments.
+- Each segment costs one question *per contract field*, so chunk size is `max_questions / len(contract)`.
+- `line_id` is global, so a chunk boundary never renumbers a line.
+- A null segments list is never sent and returns null; a failing chunk marks only its own segments in `_error`.
+
+See [TYPESAFE.md](TYPESAFE.md) for the full guide.
 
 ---
 
