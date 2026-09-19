@@ -16,3 +16,9 @@ env/
 test_docs_real.py
 test_documentation_examples.py
 validate_docs_syntax.py
+
+# Local visual/marketing assets — generated, often large, never part of the library
+docs/visuals/
+
+# macOS
+.DS_Store
