@@ -2094,6 +2094,19 @@ from polar_llama.typesafe import list_models as typesafe_models
 
 
 # ============================================================================
+# Playbooks — business rules evaluated across many rows — see docs/PLAYBOOKS.md
+# ============================================================================
+
+from polar_llama.playbook import (
+    DEFAULT_MAX_ROWS_PER_GROUP,
+    Playbook,
+    playbook,
+    playbook_eval,
+    rule,
+)
+
+
+# ============================================================================
 # Deterministic Run Manifests (issue #85) — see docs/RUN_MANIFESTS.md
 # ============================================================================
 
