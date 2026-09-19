@@ -54,7 +54,7 @@ sha2 = "0.10"
 # index's on-disk format (issue #82). The only new dependency this feature
 # adds -- instant-distance's `HnswMap`/`EmbeddingPoint` already derive
 # Serialize/Deserialize via the `with-serde` feature above.
-bincode = "1"
+bincode = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
