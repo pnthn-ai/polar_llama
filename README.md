@@ -18,7 +18,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Approximate Nearest Neighbor Search**: HNSW algorithm for fast semantic search and recommendations at scale.
 - **Prompt Optimization**: A DSPy-style optimization engine (`Signature`, `Predict`, `BootstrapFewShot`, `InstructionOptimizer`) that tunes instructions and few-shot demos against your labeled data using parallel batched evaluation.
 - **Tool Use / MCP**: Dataframe-native tool calling — LLMs emit tool calls as structured output, and `execute_tool_calls` runs every call of every row in parallel against an MCP server or a Python callable. See [docs/TOOL_USE.md](docs/TOOL_USE.md).
-- **Playbooks**: Business rules evaluated across *many rows at once* — "no employee may claim more than $5,000 in total" — grouped per entity, with Polars doing the arithmetic and the model judging what Polars can't express. See [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md).
+- **Playbooks & consistency checks**: Business rules evaluated across *many rows at once*, and — more usefully — self-consistency checks for the rules you can't write down in advance ("three years employed and never took leave"). Polars does the arithmetic; the model finds the edge cases you didn't predict. See [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md) and [docs/CONSISTENCY_PLAYBOOK.md](docs/CONSISTENCY_PLAYBOOK.md).
 - **TypeSafe System One**: A native Rust inference layer for the [TypeSafe API](https://docs.typesafe.ai/api) — typed, calibrated yes/no, choice and score questions answered per row, or one Pydantic **contract** applied to every line of a document in a single request, landing as ordinary typed columns with confidence you can threshold on. See [docs/TYPESAFE.md](docs/TYPESAFE.md).
 - **Prompt Caching**: Provider-native prompt caching (Anthropic 5m/1h `cache_control`) to share a cached system prefix across rows — pass `cache=True` with a `system_prompt`.
 
@@ -827,9 +827,26 @@ Measured against the live API on an 8-clause contract, batching a document's lin
 
 Field types pick the question type: `bool` → Noul (a probability, which you threshold), `Literal[...]`/`Enum` → Choice, numeric + `score_field(levels=...)` → Score. A plain `str` field is rejected with an explanation — TypeSafe answers are typed over a closed set and there is no free-text primitive.
 
-#### Playbooks (Business Rules Across Many Rows)
+#### Playbooks and Self-Consistency Checks
 
 `typesafe_eval` judges one row and `typesafe_eval_each` judges each segment of a document. A **playbook** judges a *group of rows together* — the shape you need for a rule no single row can violate.
+
+The most useful form needs no rules at all. Some problems can't be written down in advance — *"does it make sense that someone has worked here three years and never taken leave?"* Nobody writes that rule, and if you did you'd then need one for the intern on the top pay band, the rep with record commission and no customer meetings, the employee on leave who closed a full year of tickets. The list has no end. So don't write rules — ask whether the record hangs together:
+
+```python
+from polar_llama import self_consistency, playbook_eval
+
+flags = playbook_eval(df, self_consistency("employee record"), by="employee_id")
+flags.sort("review_priority", descending=True).head(20)   # a triage queue
+```
+
+Three things measured rather than assumed, all in [docs/CONSISTENCY_PLAYBOOK.md](docs/CONSISTENCY_PLAYBOOK.md):
+
+- **Use a score, not a yes/no.** "Is this coherent?" caught 2 of 4 planted issues; "how strongly does this warrant review?" caught 4 of 4 with no false positives (clean 0.07–0.18, planted 0.98–1.82).
+- **Record width dominates.** The same people with 5 fields ranked *clean above planted*; with 12 fields the ranking was correct. Consistency is a relationship between fields — give it few fields and there's little to be wrong.
+- **Column names are part of the prompt.** Renaming `pto_days` to `pto_days_TAKEN_last_12_months` roughly doubled the separation.
+
+For rules you *can* state, a playbook takes them explicitly:
 
 ```python
 from polar_llama import playbook, rule, playbook_eval

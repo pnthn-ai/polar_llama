@@ -18,7 +18,17 @@ import polars as pl
 import pytest
 
 from helpers import BacklogHTTPServer
-from polar_llama import DEFAULT_MAX_ROWS_PER_GROUP, Playbook, playbook, playbook_eval, rule
+from polar_llama import (
+    DEFAULT_CONSISTENCY_ASPECTS,
+    DEFAULT_MAX_ROWS_PER_GROUP,
+    DEFAULT_REVIEW_LEVELS,
+    Playbook,
+    consistency,
+    playbook,
+    playbook_eval,
+    rule,
+    self_consistency,
+)
 
 # ============================================================================
 # Mock
@@ -121,6 +131,87 @@ def test_playbooks_keep_declaration_order_and_reject_empties():
         playbook("p")
     with pytest.raises(ValueError, match="non-empty name"):
         Playbook("", {"a": rule("x")})
+
+
+# ============================================================================
+# Consistency checks (the rules you cannot write down in advance)
+# ============================================================================
+
+
+def test_consistency_is_a_score_not_a_yes_no():
+    """Measured: a yes/no coherence question caught 2 of 4 planted issues; the
+    graded review-priority score caught 4 of 4 with no false positives."""
+    c = consistency("employee record")
+    assert c["type"] == "score"
+    assert c["levels"] == DEFAULT_REVIEW_LEVELS
+
+
+def test_consistency_refuses_to_become_a_checklist():
+    c = consistency("invoice")
+    instructions = c["instructions"]
+    assert "invoice" in instructions["question"]
+    # The whole point: it must not narrow to a fixed set of checks.
+    assert "TOGETHER" in instructions["judge"]
+    assert "fixed checklist" in instructions["do_not"]
+
+
+def test_hints_are_offered_as_non_exhaustive():
+    c = consistency("shipment", notable=["delivery date vs dispatch date"])
+    key = "worth_attention_but_not_exhaustive"
+    assert c["instructions"][key] == ["delivery date vs dispatch date"]
+    # Hints must not silently become the only thing looked at.
+    assert "fixed checklist" in c["instructions"]["do_not"]
+
+
+def test_custom_levels_are_respected():
+    c = consistency("record", levels=["fine", "odd", "wrong", "impossible"])
+    assert c["levels"] == ["fine", "odd", "wrong", "impossible"]
+
+
+def test_self_consistency_pairs_a_priority_score_with_a_location():
+    pb = self_consistency("employee record")
+    assert list(pb.rules) == ["review_priority", "where"]
+    assert pb.rules["review_priority"]["type"] == "score"
+    assert pb.rules["where"]["type"] == "choice"
+    options = [o["name"] for o in pb.rules["where"]["options"]]
+    assert options == list(DEFAULT_CONSISTENCY_ASPECTS)
+    assert "nothing" in options  # a coherent record needs somewhere to land
+
+
+def test_aspects_are_generic_not_edge_cases():
+    """Naming aspects tells a reviewer where to look; it is not the same as
+    enumerating the edge cases the check exists to discover."""
+    assert set(DEFAULT_CONSISTENCY_ASPECTS) == {
+        "nothing", "time", "amounts", "activity", "status", "identity"
+    }
+
+
+def test_self_consistency_accepts_a_domain_taxonomy():
+    pb = self_consistency("invoice", aspects={"nothing": "fine", "tax": "VAT looks wrong"})
+    assert [o["name"] for o in pb.rules["where"]["options"]] == ["nothing", "tax"]
+
+
+def test_a_consistency_playbook_runs_through_playbook_eval(mock_server):
+    def responder(body):
+        answers = {}
+        for qid, q in body["questions"].items():
+            if q["type"] == "score":
+                answers[qid] = {"type": "score", "score": 1.5, "confidence": 0.8,
+                                "legend": {}, "probabilities": {}}
+            else:
+                answers[qid] = {"type": "choice", "choice": "time", "confidence": 0.7,
+                                "probabilities": {}}
+        return 200, {"model": "jev-1.13.0", "answers": answers,
+                     "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+    mock_server.responder = responder
+    df = pl.DataFrame({"id": ["E1", "E2"], "years_employed": [3.0, 3.0],
+                       "pto_days_taken_last_12_months": [18, 0]})
+    out = playbook_eval(df, self_consistency("employee record"), by="id")
+    assert out["review_priority"].to_list() == [1.5, 1.5]
+    assert out["where"].to_list() == ["time", "time"]
+    assert "where_confidence" in out.columns  # how you spot the uncertain ones
+    assert out["_error"].null_count() == 2
 
 
 # ============================================================================

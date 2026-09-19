@@ -2098,11 +2098,15 @@ from polar_llama.typesafe import list_models as typesafe_models
 # ============================================================================
 
 from polar_llama.playbook import (
+    DEFAULT_CONSISTENCY_ASPECTS,
     DEFAULT_MAX_ROWS_PER_GROUP,
+    DEFAULT_REVIEW_LEVELS,
     Playbook,
+    consistency,
     playbook,
     playbook_eval,
     rule,
+    self_consistency,
 )
 
 
