@@ -18,6 +18,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Approximate Nearest Neighbor Search**: HNSW algorithm for fast semantic search and recommendations at scale.
 - **Prompt Optimization**: A DSPy-style optimization engine (`Signature`, `Predict`, `BootstrapFewShot`, `InstructionOptimizer`) that tunes instructions and few-shot demos against your labeled data using parallel batched evaluation.
 - **Tool Use / MCP**: Dataframe-native tool calling — LLMs emit tool calls as structured output, and `execute_tool_calls` runs every call of every row in parallel against an MCP server or a Python callable. See [docs/TOOL_USE.md](docs/TOOL_USE.md).
+- **Rule assessment & plausibility checks**: Business rules evaluated across *many rows at once*, and — more usefully — plausibility checks for the rules you can't write down in advance ("three years employed and never took leave"). Polars does the arithmetic; the model finds the edge cases you didn't predict. See [docs/ASSESSMENT.md](docs/ASSESSMENT.md) and [docs/PLAUSIBILITY_PLAYBOOK.md](docs/PLAUSIBILITY_PLAYBOOK.md).
 - **TypeSafe System One**: A native Rust inference layer for the [TypeSafe API](https://docs.typesafe.ai/api) — typed, calibrated yes/no, choice and score questions answered per row, or one Pydantic **contract** applied to every line of a document in a single request, landing as ordinary typed columns with confidence you can threshold on. See [docs/TYPESAFE.md](docs/TYPESAFE.md).
 - **Prompt Caching**: Provider-native prompt caching (Anthropic 5m/1h `cache_control`) to share a cached system prefix across rows — pass `cache=True` with a `system_prompt`.
 
@@ -825,6 +826,61 @@ clauses.filter(pl.col("is_payment") > 0.8)
 Measured against the live API on an 8-clause contract, batching a document's lines into one request is **3.2x fewer input tokens and 8x fewer round trips** than a request per line — and it is the only version that keeps context. Documents longer than `max_questions` are chunked automatically and fired concurrently, with `line_id` staying global.
 
 Field types pick the question type: `bool` → Noul (a probability, which you threshold), `Literal[...]`/`Enum` → Choice, numeric + `score_field(levels=...)` → Score. A plain `str` field is rejected with an explanation — TypeSafe answers are typed over a closed set and there is no free-text primitive.
+
+#### Rule Assessment and Plausibility Checks
+
+`typesafe_eval` judges one row and `typesafe_eval_each` judges each segment of a document. A **ruleset** judges a *group of rows together* — the shape you need for a rule no single row can violate.
+
+The most useful form needs no rules at all. Some problems can't be written down in advance — *"does it make sense that someone has worked here three years and never taken leave?"* Nobody writes that rule, and if you did you'd then need one for the intern on the top pay band, the rep with record commission and no customer meetings, the employee on leave who closed a full year of tickets. The list has no end. So don't write rules — ask whether the record hangs together:
+
+```python
+from polar_llama import plausibility_check, assess
+
+flags = assess(df, plausibility_check("employee record"), by="employee_id")
+flags.sort("review_priority", descending=True).head(20)   # a triage queue
+```
+
+Three things measured rather than assumed, all in [docs/PLAUSIBILITY_PLAYBOOK.md](docs/PLAUSIBILITY_PLAYBOOK.md):
+
+- **Use a score, not a yes/no.** "Is this coherent?" caught 2 of 4 planted issues; "how strongly does this warrant review?" caught 4 of 4 with no false positives (clean 0.07–0.18, planted 0.98–1.82).
+- **Record width dominates.** The same people with 5 fields ranked *clean above planted*; with 12 fields the ranking was correct. Consistency is a relationship between fields — give it few fields and there's little to be wrong.
+- **Column names are part of the prompt.** Renaming `pto_days` to `pto_days_TAKEN_last_12_months` roughly doubled the separation.
+
+For rules you *can* state, a ruleset takes them explicitly:
+
+```python
+from polar_llama import playbook, rule, assess
+
+policy = ruleset(
+    "expense_policy",
+    within_limit = rule("No employee may claim more than $5,000 in total."),
+    receipts     = rule("Every claim over $75 must reference a receipt."),
+)
+
+verdicts = assess(
+    df, policy,
+    by="employee",                                     # one verdict per employee
+    records=["date", "amount_usd", "category"],        # columns -> a record per row
+    compute={"total_usd": pl.col("amount_usd").sum()}, # Polars does the arithmetic
+    context={"limit_usd": 5000},
+)
+
+verdicts.filter(pl.col("within_limit") < 0.5)          # the violations
+```
+
+```
+# employee  total_usd  row_count  within_limit  receipts  _error
+# alice     5400       3          0.04          0.88      null     <- flagged
+# bob       950        3          0.98          0.91      null
+# frank     6100       3          0.03          0.79      null     <- flagged
+```
+
+Each rule answers the **probability the rows adhere**, so violations are `< 0.5`. Every rule rides in the same request per group, and groups go out in parallel with the usual retry and per-group error isolation.
+
+Two things worth knowing, both measured rather than assumed:
+
+- **Signal dilutes with group size.** On a planted violation, clean and violating data separated cleanly at 6 rows (0.33 vs 0.98), were marginal at 20 (0.40 vs 0.49), and were *indistinguishable* by 60 (0.20 vs 0.39). This is not specific to arithmetic — a semantic rule held at 11 rows and was missed at 59. `assess` warns above `max_rows_per_group` (default 25).
+- **Let Polars do the arithmetic.** Judging a pre-computed aggregate instead of raw rows was exact at every size tested up to 1,000 rows summarised (0.03 vs 0.98), because the state stays small however many rows it covers. That is what `compute=` is for; reserve the model for judgment Polars cannot express.
 
 #### Tool Use and MCP
 

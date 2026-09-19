@@ -2094,6 +2094,23 @@ from polar_llama.typesafe import list_models as typesafe_models
 
 
 # ============================================================================
+# Rule assessment across many rows — see docs/ASSESSMENT.md
+# ============================================================================
+
+from polar_llama.assess import (
+    DEFAULT_MAX_ROWS_PER_GROUP,
+    DEFAULT_PLAUSIBILITY_ASPECTS,
+    DEFAULT_REVIEW_LEVELS,
+    RuleSet,
+    assess,
+    plausibility,
+    plausibility_check,
+    rule,
+    ruleset,
+)
+
+
+# ============================================================================
 # Deterministic Run Manifests (issue #85) — see docs/RUN_MANIFESTS.md
 # ============================================================================
 
