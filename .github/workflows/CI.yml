@@ -128,7 +128,7 @@ jobs:
 
       - name: Set up Rust
         run: rustup show
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       
       # Install dependencies and create virtualenv
       - name: Install dependencies and create virtualenv
@@ -254,7 +254,7 @@ jobs:
 
       - name: Set up Rust
         run: rustup show
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       # Install dependencies and create virtualenv
       - name: Install dependencies and create virtualenv
