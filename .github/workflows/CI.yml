@@ -292,7 +292,7 @@ jobs:
 
       - name: Cache pinned GGUF model
         id: cache-gguf
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models/${{ env.GGUF_FILE }}
           # Key includes the sha256 so re-pinning the model invalidates old
