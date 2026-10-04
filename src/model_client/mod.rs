@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod groq;
 pub mod bedrock;
+pub mod clef;
 pub mod typesafe;
 pub mod streaming;
 

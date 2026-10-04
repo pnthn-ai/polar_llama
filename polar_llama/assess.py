@@ -299,6 +299,7 @@ def assess(
     compute: Optional[Mapping[str, "IntoExpr"]] = None,
     context: Optional[Mapping[str, Any]] = None,
     model: Optional[str] = None,
+    provider: str = "typesafe",
     usage: bool = False,
     max_rows_per_group: int = DEFAULT_MAX_ROWS_PER_GROUP,
 ) -> pl.DataFrame:
@@ -328,7 +329,11 @@ def assess(
         Constant values added to every group's state: a policy document, a
         threshold, the period under review.
     model
-        System One model. Defaults to ``"jev-latest"``.
+        System One model. Defaults to ``"jev-latest"`` (TypeSafe) or
+        ``"@cf/cloudflare/clef"`` (Clef).
+    provider
+        ``"typesafe"`` (default) or ``"clef"`` to judge on Cloudflare's Clef
+        models via Workers AI.
     usage
         Also return ``_model`` and per-request token/latency accounting.
     max_rows_per_group
@@ -438,7 +443,9 @@ def assess(
         state.append(pl.lit(value).alias(name))
 
     out = grouped.with_columns(
-        _verdict=typesafe_eval(*state, questions=ruleset.rules, model=model, usage=usage)
+        _verdict=typesafe_eval(
+            *state, questions=ruleset.rules, model=model, provider=provider, usage=usage
+        )
     ).unnest("_verdict")
 
     # `records` was the payload; `row_count` stays, since it is how a caller

@@ -153,7 +153,7 @@ Configure API keys using environment variables:
 | AWS Bedrock | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Multiple vars |
 | TypeSafe | `TYPESAFE_API_KEY` | `apikey_...` |
 
-TypeSafe is a typed-evaluation API rather than a chat provider, so it is not a member of the `Provider` enum and is reached through [`typesafe_eval`](#typesafe_eval) instead of the inference expressions. `TYPESAFE_BASE_URL` overrides its API root (default `https://api.typesafe.ai`).
+TypeSafe is a typed-evaluation API rather than a chat provider, so it is not a member of the `Provider` enum and is reached through [`typesafe_eval`](#typesafe_eval) instead of the inference expressions. `TYPESAFE_BASE_URL` overrides its API root (default `https://api.typesafe.ai`). The same questions can be served by Cloudflare's Clef models with `provider="clef"` (needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`); see [TYPESAFE.md](TYPESAFE.md#cloudflare-clef-as-an-alternative-provider).
 
 ### Default Models
 
@@ -1106,6 +1106,7 @@ typesafe_eval(
     *state: IntoExpr,
     questions: Mapping[str, dict],
     model: str | None = None,
+    provider: str = "typesafe",
     probabilities: bool = False,
     usage: bool = False,
     state_json: bool = False,
@@ -1118,7 +1119,8 @@ typesafe_eval(
 |-----------|------|---------|-------------|
 | `*state` | `IntoExpr` | required | One expression is sent as a bare value; several are sent as a JSON object keyed by column name. `List`/`Struct` columns convert to JSON arrays/objects; a length-1 input broadcasts |
 | `questions` | `Mapping[str, dict]` | required | Question id -> `noul()` / `choice()` / `score()` spec (raw TypeSafe question JSON also accepted). Insertion order fixes column order |
-| `model` | `str` | `"jev-latest"` | System One model |
+| `model` | `str` | `"jev-latest"` | System One model (`"@cf/cloudflare/clef"` when `provider="clef"`) |
+| `provider` | `str` | `"typesafe"` | `"typesafe"`, or `"clef"` for Cloudflare's Clef models on Workers AI |
 | `probabilities` | `bool` | `False` | Also emit the full distribution per choice/score question |
 | `usage` | `bool` | `False` | Also emit `_model`, `_input_tokens`, `_output_tokens`, `_latency_ms` |
 | `state_json` | `bool` | `False` | Treat string inputs as pre-encoded JSON documents |
@@ -1188,6 +1190,7 @@ typesafe_eval_each(
     questions: Mapping[str, dict] | None = None,
     contract: type[BaseModel] | None = None,
     model: str | None = None,
+    provider: str = "typesafe",
     probabilities: bool = False,
     usage: bool = False,
     include_segment: bool = True,
@@ -1203,7 +1206,8 @@ typesafe_eval_each(
 | `*context` | `IntoExpr` | — | Extra columns folded into every request's state as shared context; length-1 broadcasts |
 | `questions` | `Mapping` | — | Question id -> spec. Mutually exclusive with `contract` |
 | `contract` | `BaseModel` | — | Pydantic model of the features to extract. Mutually exclusive with `questions` |
-| `model` | `str` | `"jev-latest"` | System One model |
+| `model` | `str` | `"jev-latest"` | System One model (`"@cf/cloudflare/clef"` when `provider="clef"`) |
+| `provider` | `str` | `"typesafe"` | `"typesafe"`, or `"clef"` for Cloudflare's Clef models on Workers AI |
 | `probabilities` | `bool` | `False` | Also emit the full distribution per choice/score question |
 | `usage` | `bool` | `False` | Also emit `_model` and per-request token/latency accounting |
 | `include_segment` | `bool` | `True` | Emit the segment's text as a `line` column |

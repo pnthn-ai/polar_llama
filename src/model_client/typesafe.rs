@@ -18,6 +18,10 @@
 //!   * `TYPESAFE_API_KEY`   -- bearer token (required).
 //!   * `TYPESAFE_BASE_URL`  -- API root override; default `https://api.typesafe.ai`.
 //!   * `POLAR_LLAMA_TYPESAFE_MAX_RETRIES` -- retry budget for 429/529/5xx (default 3).
+//!
+//! The same requests can instead be served by Cloudflare's Clef models on
+//! Workers AI ([`Backend::Clef`]), which accept the System One question format
+//! unchanged; see [`super::clef`] for the transport differences.
 
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
@@ -25,10 +29,50 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::{ModelClientError, Usage};
+use super::{clef, ModelClientError, Usage};
 
 /// TypeSafe's flagship System One model.
 pub const DEFAULT_TYPESAFE_MODEL: &str = "jev-latest";
+
+/// Who serves a System One request. The questions, answers and output columns
+/// are identical either way; only the endpoint, auth and envelope differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// TypeSafe's hosted API (`jev-*` models).
+    TypeSafe,
+    /// Cloudflare Workers AI (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`).
+    Clef,
+}
+
+impl Backend {
+    /// Parse the `provider` kwarg. `None` keeps the original TypeSafe default.
+    pub fn parse(name: Option<&str>) -> Result<Self, String> {
+        match name.map(|n| n.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("typesafe") | Some("jev") => Ok(Backend::TypeSafe),
+            Some("clef") | Some("cloudflare") => Ok(Backend::Clef),
+            Some(other) => Err(format!(
+                "Unknown System One provider '{other}'; expected 'typesafe' or 'clef'"
+            )),
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Backend::TypeSafe => DEFAULT_TYPESAFE_MODEL,
+            Backend::Clef => clef::DEFAULT_CLEF_MODEL,
+        }
+    }
+
+    /// Configuration that has to exist before any request can be addressed.
+    /// Checked once per expression so a missing account fails the call up
+    /// front instead of producing an `_error` on every row.
+    pub fn preflight(self) -> Result<(), String> {
+        match self {
+            Backend::TypeSafe => Ok(()),
+            Backend::Clef => clef::require_account().map(|_| ()),
+        }
+    }
+}
 
 /// API root, overridable for proxies/self-hosted gateways/tests.
 fn api_base() -> String {
@@ -382,13 +426,26 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// actually waited.
 pub async fn evaluate(
     http: &Client,
+    backend: Backend,
     state: &Value,
     model: &str,
     questions: &[QuestionSpec],
 ) -> Result<Evaluation, ModelClientError> {
-    let body = build_request(state, model, questions);
-    let endpoint = evaluation_endpoint();
-    let key = api_key();
+    let (endpoint, key, body) = match backend {
+        Backend::TypeSafe => (
+            evaluation_endpoint(),
+            api_key(),
+            build_request(state, model, questions),
+        ),
+        Backend::Clef => {
+            let account = clef::require_account().map_err(ModelClientError::ParseError)?;
+            (
+                clef::evaluation_endpoint(&account, model),
+                clef::api_token(),
+                clef::build_request(state, questions),
+            )
+        }
+    };
     let budget = max_retries();
 
     let t0 = Instant::now();
@@ -408,14 +465,22 @@ pub async fn evaluate(
                 let text = response.text().await?;
 
                 if status.is_success() {
-                    return parse_evaluation(&text, t0.elapsed().as_millis() as i64);
+                    let latency_ms = t0.elapsed().as_millis() as i64;
+                    return match backend {
+                        Backend::TypeSafe => parse_evaluation(&text, latency_ms),
+                        Backend::Clef => clef::parse_evaluation(&text, model, latency_ms),
+                    };
                 }
                 if is_retryable(status) && attempt < budget {
                     tokio::time::sleep(backoff_delay(attempt, retry_after)).await;
                     attempt += 1;
                     continue;
                 }
-                return Err(ModelClientError::Http(status.as_u16(), text));
+                let message = match backend {
+                    Backend::TypeSafe => text,
+                    Backend::Clef => clef::envelope_error(&text).unwrap_or(text),
+                };
+                return Err(ModelClientError::Http(status.as_u16(), message));
             }
             Err(e) => {
                 // Connect/timeout failures are worth one more try; a body or
@@ -434,6 +499,7 @@ pub async fn evaluate(
 /// Evaluate many states against the same questions, bounded by the shared
 /// `POLAR_LLAMA_MAX_CONCURRENCY` limit and preserving input order.
 pub async fn evaluate_batch(
+    backend: Backend,
     states: &[Value],
     model: &str,
     questions: &[QuestionSpec],
@@ -441,7 +507,7 @@ pub async fn evaluate_batch(
     let http = super::http_client();
     let requests: Vec<_> = states
         .iter()
-        .map(|state| evaluate(http, state, model, questions))
+        .map(|state| evaluate(http, backend, state, model, questions))
         .collect();
 
     futures::stream::iter(requests)
@@ -456,6 +522,7 @@ pub async fn evaluate_batch(
 /// expansion of the contract (one question per segment in that chunk), unlike
 /// [`evaluate_batch`] where every row shares one question set.
 pub async fn evaluate_batch_varying(
+    backend: Backend,
     states: &[Value],
     model: &str,
     question_sets: &[Vec<QuestionSpec>],
@@ -464,7 +531,7 @@ pub async fn evaluate_batch_varying(
     let requests: Vec<_> = states
         .iter()
         .zip(question_sets)
-        .map(|(state, questions)| evaluate(http, state, model, questions))
+        .map(|(state, questions)| evaluate(http, backend, state, model, questions))
         .collect();
 
     futures::stream::iter(requests)
@@ -617,6 +684,17 @@ mod tests {
         let ev = parse_evaluation(r#"{"model":"m","answers":{}}"#, 1).expect("parse");
         assert_eq!(ev.usage.input_tokens, None);
         assert_eq!(ev.usage.latency_ms, Some(1));
+    }
+
+    #[test]
+    fn provider_names_parse_to_backends() {
+        assert_eq!(Backend::parse(None).unwrap(), Backend::TypeSafe);
+        assert_eq!(Backend::parse(Some("typesafe")).unwrap(), Backend::TypeSafe);
+        assert_eq!(Backend::parse(Some("Clef")).unwrap(), Backend::Clef);
+        assert_eq!(Backend::parse(Some("cloudflare")).unwrap(), Backend::Clef);
+        assert!(Backend::parse(Some("openai")).is_err());
+        assert_eq!(Backend::Clef.default_model(), "@cf/cloudflare/clef");
+        assert_eq!(Backend::TypeSafe.default_model(), "jev-latest");
     }
 
     #[test]
