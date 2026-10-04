@@ -31,9 +31,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
-use crate::model_client::typesafe::{
-    self, Evaluation, QuestionKind, QuestionSpec, DEFAULT_TYPESAFE_MODEL,
-};
+use crate::model_client::typesafe::{self, Backend, Evaluation, QuestionKind, QuestionSpec};
 use crate::utils::RT;
 
 /// Run a future to completion on the shared runtime, spawning it so several
@@ -56,6 +54,10 @@ pub struct TypeSafeKwargs {
     questions: String,
     #[serde(default)]
     model: Option<String>,
+    /// Who serves the request: `"typesafe"` (default) or `"clef"` (Cloudflare
+    /// Workers AI). The questions and output columns are the same either way.
+    #[serde(default)]
+    provider: Option<String>,
     /// Emit the full probability distribution for choice/score questions.
     #[serde(default)]
     probabilities: Option<bool>,
@@ -481,6 +483,19 @@ fn push_row(
 // Expression
 // ============================================================================
 
+/// Pick the backend and the model it runs, and check the backend can be
+/// addressed at all before a single row is sent.
+fn resolve_backend(provider: Option<&str>, model: Option<&str>) -> PolarsResult<(Backend, String)> {
+    let backend = Backend::parse(provider).map_err(|e| polars_err!(ComputeError: "{e}"))?;
+    backend
+        .preflight()
+        .map_err(|e| polars_err!(ComputeError: "{e}"))?;
+    let model = model
+        .map(str::to_string)
+        .unwrap_or_else(|| backend.default_model().to_string());
+    Ok((backend, model))
+}
+
 #[polars_expr(output_type_func_with_kwargs=typesafe_output_type)]
 fn typesafe_eval(inputs: &[Series], kwargs: TypeSafeKwargs) -> PolarsResult<Series> {
     let (specs, cols) = plan_from_kwargs(&kwargs)?;
@@ -492,10 +507,7 @@ fn typesafe_eval(inputs: &[Series], kwargs: TypeSafeKwargs) -> PolarsResult<Seri
     // `build_states`), so the row count is the widest input.
     let n_rows = inputs.iter().map(|s| s.len()).max().unwrap_or(0);
 
-    let model = kwargs
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_TYPESAFE_MODEL.to_string());
+    let (backend, model) = resolve_backend(kwargs.provider.as_deref(), kwargs.model.as_deref())?;
     let states = build_states(inputs, kwargs.state_json.unwrap_or(false), n_rows)?;
 
     // Only rows with a usable state cost a request; nulls and malformed
@@ -514,7 +526,7 @@ fn typesafe_eval(inputs: &[Series], kwargs: TypeSafeKwargs) -> PolarsResult<Seri
         let specs_owned = specs.clone();
         let model_owned = model.clone();
         let results = run_async(async move {
-            typesafe::evaluate_batch(&send_states, &model_owned, &specs_owned).await
+            typesafe::evaluate_batch(backend, &send_states, &model_owned, &specs_owned).await
         });
         for (i, result) in send_indices.into_iter().zip(results) {
             evaluations[i] = Some(result.map_err(|e| e.to_string()));
@@ -574,6 +586,10 @@ pub struct TypeSafeEachKwargs {
     questions: String,
     #[serde(default)]
     model: Option<String>,
+    /// Who serves the request: `"typesafe"` (default) or `"clef"` (Cloudflare
+    /// Workers AI). The questions and output columns are the same either way.
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     probabilities: Option<bool>,
     #[serde(default)]
@@ -712,10 +728,7 @@ fn typesafe_eval_each(inputs: &[Series], kwargs: TypeSafeEachKwargs) -> PolarsRe
     ensure_segments_dtype(segments_series.dtype())?;
 
     let n_rows = inputs.iter().map(|s| s.len()).max().unwrap_or(0);
-    let model = kwargs
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_TYPESAFE_MODEL.to_string());
+    let (backend, model) = resolve_backend(kwargs.provider.as_deref(), kwargs.model.as_deref())?;
 
     // Each segment costs one question per contract entry, so the segments per
     // request is the question budget divided by the contract size.
@@ -764,7 +777,7 @@ fn typesafe_eval_each(inputs: &[Series], kwargs: TypeSafeEachKwargs) -> PolarsRe
         }
         let model_owned = model.clone();
         results = run_async(async move {
-            typesafe::evaluate_batch_varying(&states, &model_owned, &question_sets).await
+            typesafe::evaluate_batch_varying(backend, &states, &model_owned, &question_sets).await
         })
         .into_iter()
         .map(|r| r.map_err(|e| e.to_string()))

@@ -27,6 +27,21 @@ Configuration comes from the environment, matching the rest of polar-llama:
     Shared in-flight request cap (default 64).
 ``POLAR_LLAMA_TYPESAFE_MAX_RETRIES``
     Retry budget for 429/529/5xx, with exponential backoff (default 3).
+
+Cloudflare Clef
+---------------
+Cloudflare's open-weight Clef models accept the same System One questions
+and return the same typed answers, so ``provider="clef"`` swaps the backend
+without changing a question or a column. They run on Workers AI:
+
+``CLOUDFLARE_ACCOUNT_ID``
+    Account the Workers AI usage is billed to (required).
+``CLOUDFLARE_API_TOKEN``
+    API token with Workers AI permission (``CLOUDFLARE_API_KEY`` also works).
+``CLOUDFLARE_AI_GATEWAY_ID``
+    Route through this AI Gateway instead of calling Workers AI directly.
+``CLOUDFLARE_API_BASE_URL``
+    API root override; defaults to ``https://api.cloudflare.com/client/v4``.
 """
 
 from __future__ import annotations
@@ -57,12 +72,25 @@ DEFAULT_MODEL = "jev-latest"
 #: to the chat providers' own defaults.
 DEFAULT_TYPESAFE_MODEL = DEFAULT_MODEL
 
+#: Cloudflare's 27B Clef decision model, the default for ``provider="clef"``.
+DEFAULT_CLEF_MODEL = "@cf/cloudflare/clef"
+
+#: The Clef family on Workers AI. Short names (``"clef"``, ``"clef-flash"``)
+#: are accepted too and resolved into the ``@cf/cloudflare/`` namespace.
+CLEF_MODELS = ("@cf/cloudflare/clef", "@cf/cloudflare/clef-flash")
+
+#: Backends that serve System One requests.
+PROVIDERS = ("typesafe", "clef")
+
 #: Every free-form TypeSafe field accepts ``string | object | array | null``.
 Entry = Any
 
 __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TYPESAFE_MODEL",
+    "DEFAULT_CLEF_MODEL",
+    "CLEF_MODELS",
+    "PROVIDERS",
     "DEFAULT_MAX_QUESTIONS",
     "noul",
     "choice",
@@ -528,11 +556,24 @@ def _encode_questions(questions: Mapping[str, Any]) -> str:
 # ============================================================================
 
 
+def _check_provider(provider: str) -> str:
+    """Normalise ``provider`` and reject unknown names before any request."""
+    name = str(provider).strip().lower()
+    aliases = {"jev": "typesafe", "cloudflare": "clef"}
+    name = aliases.get(name, name)
+    if name not in PROVIDERS:
+        raise ValueError(
+            f"Unknown System One provider {provider!r}; expected one of {PROVIDERS}"
+        )
+    return name
+
+
 def typesafe_eval(
     *state: "IntoExpr",
     questions: Optional[Mapping[str, Any]] = None,
     contract: Optional[Type["BaseModel"]] = None,
     model: Optional[str] = None,
+    provider: str = "typesafe",
     probabilities: bool = False,
     usage: bool = False,
     state_json: bool = False,
@@ -561,7 +602,11 @@ def typesafe_eval(
         A Pydantic model describing the features to extract, converted by
         :func:`contract_questions`. Mutually exclusive with ``questions``.
     model
-        System One model. Defaults to ``"jev-latest"``.
+        System One model. Defaults to ``"jev-latest"`` for TypeSafe and
+        ``"@cf/cloudflare/clef"`` for Clef.
+    provider
+        ``"typesafe"`` (default) or ``"clef"`` to run on Cloudflare's Clef
+        models via Workers AI. Questions and output columns are identical.
     probabilities
         Also emit the full distribution for choice/score questions, as
         ``<id>_p_<option>`` / ``<id>_p_<level index>``.
@@ -629,6 +674,7 @@ def typesafe_eval(
     kwargs = {
         "questions": _encode_questions(_resolve_questions(questions, contract)),
         "model": model,
+        "provider": _check_provider(provider),
         "probabilities": bool(probabilities),
         "usage": bool(usage),
         "state_json": bool(state_json),
@@ -649,6 +695,7 @@ def typesafe_eval_each(
     questions: Optional[Mapping[str, Any]] = None,
     contract: Optional[Type["BaseModel"]] = None,
     model: Optional[str] = None,
+    provider: str = "typesafe",
     probabilities: bool = False,
     usage: bool = False,
     include_segment: bool = True,
@@ -684,7 +731,11 @@ def typesafe_eval_each(
         A Pydantic model describing the features to extract from each segment.
         Mutually exclusive with ``questions``.
     model
-        System One model. Defaults to ``"jev-latest"``.
+        System One model. Defaults to ``"jev-latest"`` for TypeSafe and
+        ``"@cf/cloudflare/clef"`` for Clef.
+    provider
+        ``"typesafe"`` (default) or ``"clef"`` to run on Cloudflare's Clef
+        models via Workers AI. Questions and output columns are identical.
     probabilities
         Also emit the full distribution for choice/score questions.
     usage
@@ -746,6 +797,7 @@ def typesafe_eval_each(
     kwargs = {
         "questions": _encode_questions(_resolve_questions(questions, contract)),
         "model": model,
+        "provider": _check_provider(provider),
         "probabilities": bool(probabilities),
         "usage": bool(usage),
         "include_segment": bool(include_segment),

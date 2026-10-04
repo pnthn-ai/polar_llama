@@ -2080,6 +2080,8 @@ from polar_llama.index import (
 # ============================================================================
 
 from polar_llama.typesafe import (
+    CLEF_MODELS,
+    DEFAULT_CLEF_MODEL,
     DEFAULT_TYPESAFE_MODEL,
     choice,
     choice_field,
@@ -2383,6 +2385,7 @@ class LlamaNamespace:
         *extra_state: "IntoExpr",
         questions: Dict[str, Any],
         model: Optional[str] = None,
+        provider: str = "typesafe",
         probabilities: bool = False,
         usage: bool = False,
         state_json: bool = False,
@@ -2404,7 +2407,10 @@ class LlamaNamespace:
             Mapping of question id to a :func:`noul` / :func:`choice` /
             :func:`score` spec. Insertion order fixes output column order.
         model
-            System One model. Defaults to ``"jev-latest"``.
+            System One model. Defaults to ``"jev-latest"`` (TypeSafe) or
+            ``"@cf/cloudflare/clef"`` (Clef).
+        provider
+            ``"typesafe"`` (default) or ``"clef"`` for Cloudflare Workers AI.
         probabilities
             Also emit the full distribution for choice/score questions.
         usage
@@ -2422,6 +2428,7 @@ class LlamaNamespace:
             *extra_state,
             questions=questions,
             model=model,
+            provider=provider,
             probabilities=probabilities,
             usage=usage,
             state_json=state_json,
@@ -2433,6 +2440,7 @@ class LlamaNamespace:
         questions: Optional[Dict[str, Any]] = None,
         contract: Optional[Type["BaseModel"]] = None,
         model: Optional[str] = None,
+        provider: str = "typesafe",
         probabilities: bool = False,
         usage: bool = False,
         include_segment: bool = True,
@@ -2453,6 +2461,7 @@ class LlamaNamespace:
             questions=questions,
             contract=contract,
             model=model,
+            provider=provider,
             probabilities=probabilities,
             usage=usage,
             include_segment=include_segment,

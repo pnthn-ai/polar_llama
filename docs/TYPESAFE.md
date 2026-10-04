@@ -334,6 +334,52 @@ subtracted so the 30s cap is a real ceiling. `401` and `422` are **not**
 retried -- a bad key or a malformed question will not fix itself, and retrying
 only bills for it again.
 
+## Cloudflare Clef as an alternative provider
+
+Cloudflare's open-weight [Clef](https://developers.cloudflare.com/workers-ai/models/clef/)
+decision models are Jev-API compatible: they take the same `state` and the same
+`noul` / `choice` / `score` questions, and return the same typed answers. So
+switching is one argument -- no question, contract or downstream column
+changes:
+
+```python
+out = df.with_columns(
+    ts=typesafe_eval(pl.col("message"), questions={...}, provider="clef")
+).unnest("ts")
+
+# The faster 9B model; short names resolve into @cf/cloudflare/.
+typesafe_eval(pl.col("message"), questions={...}, provider="clef", model="clef-flash")
+
+# Per-line contracts and rule assessment take the same argument.
+typesafe_eval_each(pl.col("clause"), contract=ClauseFeatures, provider="clef")
+assess(df, rules, by="employee_id", provider="clef")
+```
+
+| Model | Workers AI id | Notes |
+|---|---|---|
+| Clef (default) | `@cf/cloudflare/clef` | 27B, 65,536-token context |
+| Clef-flash | `@cf/cloudflare/clef-flash` | 9B fine-tune of Qwen3.5-9B, cheaper and faster |
+
+What differs is only the transport (`src/model_client/clef.rs`):
+
+* **Endpoint** -- `POST /accounts/{account}/ai/run/{model}` on Workers AI, so
+  the model is in the path and the body is just `{state, questions}`. With
+  `CLOUDFLARE_AI_GATEWAY_ID` set, the request goes through AI Gateway
+  (`gateway.ai.cloudflare.com/v1/{account}/{gateway}/workers-ai/{model}`)
+  instead, for its logging, caching and rate limiting.
+* **Envelope** -- answers are unwrapped from Cloudflare's
+  `{success, errors, result: {model, answers, usage}}`. A `success: false`
+  inside an HTTP 200 becomes a row `_error`, and HTTP failures carry
+  Cloudflare's own reason (`HTTP Error 401: Authentication error (code 10000)`).
+* **`_model`** -- reports the model Cloudflare says ran, falling back to the
+  requested id.
+
+Retries, concurrency, null handling and per-row failure isolation are the
+shared code path, so they behave exactly as described above. A missing
+`CLOUDFLARE_ACCOUNT_ID` fails the expression up front rather than producing an
+error on every row. `typesafe_models()` lists TypeSafe's catalogue only; the
+Clef ids are exported as `polar_llama.CLEF_MODELS`.
+
 ## Configuration
 
 | Variable | Meaning |
@@ -341,7 +387,11 @@ only bills for it again.
 | `TYPESAFE_API_KEY` | Bearer token (required) |
 | `TYPESAFE_BASE_URL` | API root override; default `https://api.typesafe.ai` |
 | `POLAR_LLAMA_MAX_CONCURRENCY` | Shared in-flight request cap (default 64) |
-| `POLAR_LLAMA_TYPESAFE_MAX_RETRIES` | Retry budget for 429/529/5xx (default 3) |
+| `POLAR_LLAMA_TYPESAFE_MAX_RETRIES` | Retry budget for 429/529/5xx (default 3); applies to Clef too |
+| `CLOUDFLARE_ACCOUNT_ID` | Workers AI account (required for `provider="clef"`) |
+| `CLOUDFLARE_API_TOKEN` | Workers AI API token (required for `provider="clef"`; `CLOUDFLARE_API_KEY` also accepted) |
+| `CLOUDFLARE_AI_GATEWAY_ID` | Route Clef requests through this AI Gateway (optional) |
+| `CLOUDFLARE_API_BASE_URL` | Workers AI API root override; default `https://api.cloudflare.com/client/v4` |
 
 ```python
 from polar_llama import typesafe_models
@@ -356,8 +406,9 @@ a local stdlib mock of `POST /v1/systemone`, reached by pointing
 test at the bottom runs only when `TYPESAFE_API_KEY` is set.
 
 ```bash
-python -m pytest tests/test_typesafe.py -q
+python -m pytest tests/test_typesafe.py tests/test_clef.py -q
 cargo test --lib --no-default-features typesafe
+cargo test --lib --no-default-features clef
 ```
 
 The `--no-default-features` flag drops pyo3's `extension-module` so the crate
